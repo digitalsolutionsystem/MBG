@@ -326,39 +326,89 @@ def update_repo():
         subprocess.run(["git", "checkout", "-b", branch], capture_output=True)
 
     # ── 5. Set / update remote origin ────────
-    remotes = subprocess.run(["git", "remote"], capture_output=True, text=True).stdout
+    auth_url = remote_url.replace("https://", f"https://{token}@")
+    remotes  = subprocess.run(["git", "remote"], capture_output=True, text=True).stdout
     if "origin" in remotes:
         subprocess.run(["git", "remote", "set-url", "origin", remote_url], capture_output=True)
     else:
         subprocess.run(["git", "remote", "add", "origin", remote_url], capture_output=True)
     print(f"🔗 Remote → {remote_url}")
 
-    # ── 6. Cek perubahan & commit ─────────────
+    # ── 6. Fetch & sinkron dengan remote DULU ─
+    print("⏳ Fetch dari remote...", end="\r", flush=True)
+    fetch_result = subprocess.run(
+        ["git", "fetch", auth_url, branch],
+        capture_output=True, text=True
+    )
+    if fetch_result.returncode == 0:
+        if not has_commits():
+            # Fresh repo: arahkan branch ke FETCH_HEAD supaya history nyambung
+            subprocess.run(
+                ["git", "update-ref", f"refs/heads/{branch}", "FETCH_HEAD"],
+                capture_output=True
+            )
+        else:
+            # Repo sudah ada commit: rebase lokal ke atas remote
+            rebase_result = subprocess.run(
+                ["git", "rebase", "FETCH_HEAD"],
+                capture_output=True, text=True
+            )
+            if rebase_result.returncode != 0:
+                subprocess.run(["git", "rebase", "--abort"], capture_output=True)
+                err = rebase_result.stderr.strip() or rebase_result.stdout.strip()
+                print("\n" + "═" * 38)
+                print(f"❌ SYNC GAGAL ke {gh['full_name']}")
+                print(f"   ⚠️  {err.splitlines()[-1] if err else 'unknown'}")
+                print("   💡 Selesaikan konflik manual lalu coba lagi")
+                print("═" * 38)
+                log("Sync gagal — selesaikan konflik manual", "fail")
+                input("\nTekan Enter untuk kembali ke menu...")
+                return
+        print("✅ Sync dengan remote selesai      ")
+    else:
+        # Remote branch belum ada (repo GitHub masih kosong) - lanjut langsung
+        print("ℹ️  Remote branch belum ada, lanjut push...   ")
+
+    # ── 7. Cek perubahan & commit ─────────────
     status = subprocess.run(
         ["git", "status", "--porcelain"],
         capture_output=True, text=True
     )
     changed_files = status.stdout.strip()
+    commit_msg    = None
 
     if changed_files:
         print(f"\n📝 File berubah:\n{changed_files}\n")
-        msg = ask("Pesan commit")
+        commit_msg = ask("Pesan commit")
         subprocess.run(["git", "add", "."])
         result = subprocess.run(
-            ["git", "commit", "-m", msg],
+            ["git", "commit", "-m", commit_msg],
             capture_output=True, text=True
         )
         if result.returncode != 0 and "nothing to commit" not in result.stdout:
             log("Commit gagal", "fail")
+            input("\nTekan Enter untuk kembali ke menu...")
             return
-        print(f"✅ Commit: \"{msg}\"")
+        print(f"✅ Commit: \"{commit_msg}\"")
     else:
         print("ℹ️  Tidak ada perubahan baru, langsung push...\n")
 
-    # ── 7. Push ───────────────────────────────
+    # ── 8. Push ───────────────────────────────
     push(branch)
+
+    print("\n" + "═" * 38)
     if last_log["status"] == "ok":
+        print(f"✅ BERHASIL di-push ke {gh['full_name']}")
+        if commit_msg:
+            print(f"   💬 Pesan  : \"{commit_msg}\"")
+        print(f"   🌿 Branch : {branch}")
+        print(f"   📂 Folder : {cwd_name}")
         log(f"'{cwd_name}' berhasil di-push ke {gh['full_name']}", "ok")
+    else:
+        print(f"❌ PUSH GAGAL ke {gh['full_name']}")
+        print(f"   ⚠️  {last_log['msg']}")
+    print("═" * 38)
+    input("\nTekan Enter untuk kembali ke menu...")
 
 def setup_credentials():
     clear()
